@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import httpx
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommand
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -793,9 +793,16 @@ async def send_notifications(
     except Exception as e:
         logger.error(f"Error preparing notifications: {e}")
 
+async def set_bot_commands(application: Application):
+    """Set up the Telegram menu button commands."""
+    commands = [
+        BotCommand("start", "🏠 Відкрити головне меню"),
+    ]
+    await application.bot.set_my_commands(commands)
 
 async def post_init(application: Application):
     """Post initialization hook to start background tasks."""
+    await set_bot_commands(application)
     asyncio.create_task(alerts_poller(application))
 
 
