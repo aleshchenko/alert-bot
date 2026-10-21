@@ -1,0 +1,825 @@
+"""
+Telegram Alert Bot for alerts.in.ua - Background Worker for Render.com
+Polls alerts API every 10 seconds and sends notifications to subscribed users.
+"""
+
+import asyncio
+import csv
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+
+import httpx
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# Environment variables
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ALERTS_API_TOKEN = os.getenv("ALERTS_API_TOKEN")
+ALERTS_API_URL = "https://api.alerts.in.ua/v1/alerts/active.json"
+
+# File paths
+USERS_CSV = Path("users.csv")
+LAST_API_RESPONSE_FILE = Path("last_api_response.json")
+LOCATIONS_CSV = Path("locations.csv")
+
+# Conversation states
+SELECT_ACTION, SELECT_LOCATION_TYPE, SELECT_LOCATION = range(3)
+
+# Ukrainian translations
+MESSAGES = {
+    "start": "👋 Вітаємо! Це бот для сповіщень про тривоги\n\nЩо ви хочете зробити?",
+    "menu": "Виберіть дію:",
+    "add_location": "➕ Додати локацію",
+    "remove_location": "➖ Видалити локацію",
+    "view_subscriptions": "📋 Мої підписки",
+    "select_region": "🗺️ Виберіть область або місто:",
+    "select_subregion": "📍 Виберіть район або територіальну громаду:",
+    "added": "✅ Локація додана: {location}",
+    "already_subscribed": "⚠️ Ви вже підписані на цю локацію",
+    "removed": "❌ Локація видалена: {location}",
+    "not_subscribed": "⚠️ Ви не підписані на цю локацію",
+    "subscriptions": "📋 Ваші підписки:\n{locations}",
+    "no_subscriptions": "Ви поки не підписані на жодну локацію",
+    "select_to_remove": "🗑️ Виберіть локацію для видалення:",
+    "no_locations": "Немає доступних локацій",
+    "back": "⬅️ Назад",
+    "cancelled": "Скасовано",
+}
+
+# Alert type and level icons/translations
+ALERT_TYPE_MAP = {
+    "air_raid": "✈️ Тривога",
+    "artillery_shelling": "💥 Артилерійський обстріл",
+    "urban_fights": "🔫 Стрілецькі бої",
+}
+
+LEVEL_ICON = {
+    "red": "🔴",
+    "yellow": "🟡",
+    "green": "🟢",
+}
+
+
+class LocationManager:
+    """Manages location data from CSV."""
+
+    def __init__(self):
+        self.locations: Dict[str, Dict] = {}
+        self.load_locations()
+
+    def load_locations(self):
+        """Load locations from CSV file."""
+        try:
+            if not LOCATIONS_CSV.exists():
+                self._create_locations_from_data()
+            
+            with open(LOCATIONS_CSV, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    uid = row["UID"]
+                    self.locations[uid] = {
+                        "name": row["Назва"],
+                        "type": row["Тип"],
+                        "parent": row.get("Батьківська область UID", ""),
+                    }
+            logger.info(f"Loaded {len(self.locations)} locations")
+        except Exception as e:
+            logger.error(f"Error loading locations: {e}")
+
+    def _create_locations_from_data(self):
+        """Create locations CSV from embedded data."""
+        locations_data = [
+            ("31", "м. Київ", "Місто з спеціальним статусом", ""),
+            ("30", "м. Севастополь", "Місто з спеціальним статусом", ""),
+            ("29", "Автономна Республіка Крим", "Область", ""),
+            ("8", "Волинська область", "Область", ""),
+            ("38", "Володимирський район", "Район", "8"),
+            ("41", "Камінь-Каширський район", "Район", "8"),
+            ("40", "Ковельський район", "Район", "8"),
+            ("39", "Луцький район", "Район", "8"),
+            ("4", "Вінницька область", "Область", ""),
+            ("36", "Вінницький район", "Район", "4"),
+            ("37", "Гайсинський район", "Район", "4"),
+            ("35", "Жмеринський район", "Район", "4"),
+            ("33", "Могилів-Подільський район", "Район", "4"),
+            ("32", "Тульчинський район", "Район", "4"),
+            ("34", "Хмільницький район", "Район", "4"),
+            ("9", "Дніпропетровська область", "Область", ""),
+            ("44", "Дніпровський район", "Район", "9"),
+            ("42", "Кам'янський район", "Район", "9"),
+            ("46", "Криворізький район", "Район", "9"),
+            ("47", "Нікопольський район", "Район", "9"),
+            ("45", "Павлоградський район", "Район", "9"),
+            ("43", "Самарівський район", "Район", "9"),
+            ("48", "Синельниківський район", "Район", "9"),
+            ("28", "Донецька область", "Область", ""),
+            ("54", "Бахмутський район", "Район", "28"),
+            ("55", "Волноваський район", "Район", "28"),
+            ("51", "Горлівський район", "Район", "28"),
+            ("53", "Донецький район", "Район", "28"),
+            ("49", "Кальміуський район", "Район", "28"),
+            ("50", "Краматорський район", "Район", "28"),
+            ("52", "Маріупольський район", "Район", "28"),
+            ("56", "Покровський район", "Район", "28"),
+            ("10", "Житомирська область", "Область", ""),
+            ("57", "Бердичівський район", "Район", "10"),
+            ("59", "Житомирський район", "Район", "10"),
+            ("60", "Звягельський район", "Район", "10"),
+            ("58", "Коростенський район", "Район", "10"),
+            ("11", "Закарпатська область", "Область", ""),
+            ("61", "Берегівський район", "Район", "11"),
+            ("65", "Мукачівський район", "Район", "11"),
+            ("63", "Рахівський район", "Район", "11"),
+            ("64", "Тячівський район", "Район", "11"),
+            ("66", "Ужгородський район", "Район", "11"),
+            ("62", "Хустський район", "Район", "11"),
+            ("12", "Запорізька область", "Область", ""),
+            ("147", "Бердянський район", "Район", "12"),
+            ("146", "Василівський район", "Район", "12"),
+            ("149", "Запорізький район", "Район", "12"),
+            ("148", "Мелітопольський район", "Район", "12"),
+            ("145", "Пологівський район", "Район", "12"),
+            ("14", "Київська область", "Область", ""),
+            ("78", "Бориспільський район", "Район", "14"),
+            ("79", "Броварський район", "Район", "14"),
+            ("75", "Бучанський район", "Район", "14"),
+            ("73", "Білоцерківський район", "Район", "14"),
+            ("74", "Вишгородський район", "Район", "14"),
+            ("76", "Обухівський район", "Район", "14"),
+            ("77", "Фастівський район", "Район", "14"),
+            ("15", "Кіровоградська область", "Область", ""),
+            ("82", "Голованівський район", "Район", "15"),
+            ("81", "Кропивницький район", "Район", "15"),
+            ("83", "Новоукраїнський район", "Район", "15"),
+            ("80", "Олександрійський район", "Район", "15"),
+            ("16", "Луганська область", "Область", ""),
+            ("1803", "Алчевський район", "Район", "16"),
+            ("1804", "Довжанський район", "Район", "16"),
+            ("1801", "Луганський район", "Район", "16"),
+            ("1802", "Ровеньківський район", "Район", "16"),
+            ("85", "Сватівський район", "Район", "16"),
+            ("86", "Старобільський район", "Район", "16"),
+            ("84", "Сіверськодонецький район", "Район", "16"),
+            ("87", "Щастинський район", "Район", "16"),
+            ("27", "Львівська область", "Область", ""),
+            ("91", "Дрогобицький район", "Район", "27"),
+            ("94", "Золочівський район", "Район", "27"),
+            ("90", "Львівський район", "Район", "27"),
+            ("88", "Самбірський район", "Район", "27"),
+            ("89", "Стрийський район", "Район", "27"),
+            ("92", "Шептицький район", "Район", "27"),
+            ("93", "Яворівський район", "Район", "27"),
+            ("17", "Миколаївська область", "Область", ""),
+            ("96", "Баштанський район", "Район", "17"),
+            ("95", "Вознесенський район", "Район", "17"),
+            ("98", "Миколаївський район", "Район", "17"),
+            ("97", "Первомайський район", "Район", "17"),
+            ("18", "Одеська область", "Область", ""),
+            ("100", "Березівський район", "Район", "18"),
+            ("105", "Болградський район", "Район", "18"),
+            ("102", "Білгород-Дністровський район", "Район", "18"),
+            ("104", "Одеський район", "Район", "18"),
+            ("99", "Подільський район", "Район", "18"),
+            ("103", "Роздільнянський район", "Район", "18"),
+            ("101", "Ізмаїльський район", "Район", "18"),
+            ("19", "Полтавська область", "Область", ""),
+            ("107", "Кременчуцький район", "Район", "19"),
+            ("106", "Лубенський район", "Район", "19"),
+            ("108", "Миргородський район", "Район", "19"),
+            ("109", "Полтавський район", "Район", "19"),
+            ("5", "Рівненська область", "Область", ""),
+            ("110", "Вараський район", "Район", "5"),
+            ("111", "Дубенський район", "Район", "5"),
+            ("112", "Рівненський район", "Район", "5"),
+            ("113", "Сарненський район", "Район", "5"),
+            ("20", "Сумська область", "Область", ""),
+            ("117", "Конотопський район", "Район", "20"),
+            ("118", "Охтирський район", "Район", "20"),
+            ("116", "Роменський район", "Район", "20"),
+            ("114", "Сумський район", "Область", "20"),
+            ("115", "Шосткинський район", "Район", "20"),
+            ("21", "Тернопільська область", "Область", ""),
+            ("120", "Кременецький район", "Район", "21"),
+            ("119", "Тернопільський район", "Район", "21"),
+            ("121", "Чортківський район", "Район", "21"),
+            ("22", "Харківська область", "Область", ""),
+            ("127", "Берестинський район", "Район", "22"),
+            ("126", "Богодухівський район", "Район", "22"),
+            ("123", "Куп'янський район", "Район", "22"),
+            ("128", "Лозівський район", "Район", "22"),
+            ("124", "Харківський район", "Район", "22"),
+            ("122", "Чугуївський район", "Район", "22"),
+            ("125", "Ізюмський район", "Район", "22"),
+            ("23", "Херсонська область", "Область", ""),
+            ("129", "Бериславський район", "Район", "23"),
+            ("133", "Генічеський район", "Район", "23"),
+            ("131", "Каховський район", "Район", "23"),
+            ("130", "Скадовський район", "Район", "23"),
+            ("132", "Херсонський район", "Район", "23"),
+            ("3", "Хмельницька область", "Область", ""),
+            ("135", "Кам'янець-Подільський район", "Район", "3"),
+            ("134", "Хмельницький район", "Район", "3"),
+            ("136", "Шепетівський район", "Район", "3"),
+            ("24", "Черкаська область", "Область", ""),
+            ("150", "Звенигородський район", "Район", "24"),
+            ("153", "Золотоніський район", "Район", "24"),
+            ("151", "Уманський район", "Район", "24"),
+            ("152", "Черкаський район", "Район", "24"),
+            ("26", "Чернівецька область", "Область", ""),
+            ("138", "Вижницький район", "Район", "26"),
+            ("139", "Дністровський район", "Район", "26"),
+            ("137", "Чернівецький район", "Район", "26"),
+            ("25", "Чернігівська область", "Область", ""),
+            ("144", "Корюківський район", "Район", "25"),
+            ("141", "Новгород-Сіверський район", "Район", "25"),
+            ("142", "Ніжинський район", "Район", "25"),
+            ("143", "Прилуцький район", "Район", "25"),
+            ("140", "Чернігівський район", "Район", "25"),
+            ("13", "Івано-Франківська область", "Область", ""),
+            ("67", "Верховинський район", "Район", "13"),
+            ("71", "Калуський район", "Район", "13"),
+            ("70", "Коломийський район", "Район", "13"),
+            ("69", "Косівський район", "Район", "13"),
+            ("72", "Надвірнянський район", "Район", "13"),
+            ("68", "Івано-Франківський район", "Район", "13"),
+        ]
+        
+        with open(LOCATIONS_CSV, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["UID", "Назва", "Тип", "Батьківська область UID"])
+            writer.writerows(locations_data)
+
+    def get_regions(self) -> Dict[str, str]:
+        """Get all regions (Область, Місто з спеціальним статусом)."""
+        return {
+            uid: loc["name"]
+            for uid, loc in self.locations.items()
+            if loc["type"] in ("Область", "Місто з спеціальним статусом")
+        }
+
+    def get_subregions(self, parent_uid: str) -> Dict[str, str]:
+        """Get sub-regions (Район, hromada) for a parent region."""
+        return {
+            uid: loc["name"]
+            for uid, loc in self.locations.items()
+            if loc.get("parent") == parent_uid
+        }
+
+    def get_location_name(self, uid: str) -> Optional[str]:
+        """Get location name by UID."""
+        return self.locations.get(uid, {}).get("name")
+
+
+class UserManager:
+    """Manages user subscriptions in CSV."""
+
+    def __init__(self):
+        self.ensure_csv_exists()
+
+    def ensure_csv_exists(self):
+        """Create CSV if it doesn't exist."""
+        if not USERS_CSV.exists():
+            with open(USERS_CSV, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["userId", "locations"])
+
+    def get_user_locations(self, user_id: int) -> Set[str]:
+        """Get all subscribed location UIDs for a user."""
+        self.ensure_csv_exists()
+        try:
+            with open(USERS_CSV, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row["userId"] == str(user_id):
+                        locations_str = row.get("locations", "")
+                        return set(locations_str.split(",")) if locations_str else set()
+        except Exception as e:
+            logger.error(f"Error reading user locations: {e}")
+        return set()
+
+    def add_location(self, user_id: int, location_uid: str) -> bool:
+        """Add a location to user's subscriptions."""
+        self.ensure_csv_exists()
+        locations = self.get_user_locations(user_id)
+        if location_uid in locations:
+            return False  # Already subscribed
+        
+        locations.add(location_uid)
+        self._save_user_locations(user_id, locations)
+        return True
+
+    def remove_location(self, user_id: int, location_uid: str) -> bool:
+        """Remove a location from user's subscriptions."""
+        self.ensure_csv_exists()
+        locations = self.get_user_locations(user_id)
+        if location_uid not in locations:
+            return False  # Not subscribed
+        
+        locations.remove(location_uid)
+        self._save_user_locations(user_id, locations)
+        return True
+
+    def _save_user_locations(self, user_id: int, locations: Set[str]):
+        """Save user locations to CSV."""
+        rows = []
+        user_found = False
+        user_id_str = str(user_id)
+        locations_str = ",".join(sorted(locations)) if locations else ""
+
+        try:
+            if USERS_CSV.exists():
+                with open(USERS_CSV, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        if row["userId"] == user_id_str:
+                            user_found = True
+                            rows.append({"userId": user_id_str, "locations": locations_str})
+                        else:
+                            rows.append(row)
+
+            if not user_found:
+                rows.append({"userId": user_id_str, "locations": locations_str})
+
+            with open(USERS_CSV, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["userId", "locations"])
+                writer.writeheader()
+                writer.writerows(rows)
+        except Exception as e:
+            logger.error(f"Error saving user locations: {e}")
+
+
+class AlertsPollerManager:
+    """Manages API polling and change detection."""
+
+    def __init__(self):
+        self.last_response: Dict = {}
+        self.last_modified: Optional[str] = None
+        self.http_client: Optional[httpx.AsyncClient] = None
+        self.load_last_response()
+
+    def load_last_response(self):
+        """Load last API response from file."""
+        try:
+            if LAST_API_RESPONSE_FILE.exists():
+                with open(LAST_API_RESPONSE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.last_response = data.get("alerts", {})
+                    self.last_modified = data.get("last_modified")
+                logger.info("Loaded last API response")
+        except Exception as e:
+            logger.error(f"Error loading last response: {e}")
+
+    def save_response(self, alerts_data: List[Dict], last_modified: str):
+        """Save API response to file."""
+        try:
+            # Convert alerts list to dict keyed by location_uid for easier comparison
+            alerts_dict = {}
+            for alert in alerts_data:
+                uid = alert.get("location_uid")
+                if uid:
+                    alerts_dict[uid] = alert
+
+            data = {
+                "alerts": alerts_dict,
+                "last_modified": last_modified,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            with open(LAST_API_RESPONSE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.last_response = alerts_dict
+            self.last_modified = last_modified
+        except Exception as e:
+            logger.error(f"Error saving response: {e}")
+
+    async def poll_alerts(self) -> Tuple[List[Dict], Optional[str]]:
+        """Poll alerts API with conditional request."""
+        if not self.http_client:
+            self.http_client = httpx.AsyncClient()
+
+        headers = {"Authorization": f"Bearer {ALERTS_API_TOKEN}"}
+        if self.last_modified:
+            headers["If-Modified-Since"] = self.last_modified
+
+        try:
+            response = await self.http_client.get(ALERTS_API_URL, headers=headers, timeout=10)
+
+            if response.status_code == 304:
+                logger.debug("API returned 304 Not Modified")
+                return [], None
+
+            response.raise_for_status()
+            data = response.json()
+            
+            last_modified = response.headers.get("Last-Modified")
+            alerts = data.get("alerts", [])
+            
+            return alerts, last_modified
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error polling alerts: {e}")
+            return [], None
+        except Exception as e:
+            logger.error(f"Error polling alerts: {e}")
+            return [], None
+
+    def detect_changes(self, new_alerts: List[Dict]) -> Dict[str, Dict]:
+        """
+        Detect changes between old and new alerts.
+        Returns dict of location_uid -> change_info
+        """
+        changes = {}
+        new_alerts_by_uid = {a.get("location_uid"): a for a in new_alerts}
+        
+        # Check for new alerts and threat changes
+        for location_uid, alert in new_alerts_by_uid.items():
+            old_alert = self.last_response.get(location_uid)
+            
+            if not old_alert:
+                # New alert started
+                changes[location_uid] = {
+                    "type": "new_alert",
+                    "alert": alert,
+                }
+            else:
+                # Check for new threats
+                old_threats = set()
+                new_threats = set()
+                
+                for threat in old_alert.get("threats", []):
+                    threat_key = (threat.get("threat_type"), threat.get("level"))
+                    old_threats.add(threat_key)
+                
+                for threat in alert.get("threats", []):
+                    threat_key = (threat.get("threat_type"), threat.get("level"))
+                    new_threats.add(threat_key)
+                
+                if new_threats - old_threats:
+                    # New threat(s) added
+                    changes[location_uid] = {
+                        "type": "new_threat",
+                        "alert": alert,
+                    }
+
+        # Check for cancelled alerts
+        for location_uid, old_alert in self.last_response.items():
+            if location_uid not in new_alerts_by_uid:
+                # Alert was cancelled
+                changes[location_uid] = {
+                    "type": "alert_cancelled",
+                    "alert": old_alert,
+                }
+
+        return changes
+
+
+# Global managers
+location_manager = LocationManager()
+user_manager = UserManager()
+alerts_manager = AlertsPollerManager()
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start command."""
+    keyboard = [
+        [
+            InlineKeyboardButton(MESSAGES["add_location"], callback_data="add"),
+            InlineKeyboardButton(MESSAGES["remove_location"], callback_data="remove"),
+        ],
+        [InlineKeyboardButton(MESSAGES["view_subscriptions"], callback_data="view")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(MESSAGES["start"], reply_markup=reply_markup)
+
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle button presses."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "add":
+        await show_regions(query, context, "add")
+    elif query.data == "remove":
+        await show_remove_menu(query, context)
+    elif query.data == "view":
+        await show_subscriptions(query, context)
+    elif query.data.startswith("region_"):
+        parent_uid = query.data.split("_")[1]
+        if context.user_data.get("action") == "add":
+            await show_subregions(query, context, parent_uid)
+        elif context.user_data.get("action") == "remove":
+            await show_remove_subregions(query, context, parent_uid)
+    elif query.data.startswith("select_"):
+        location_uid = query.data.split("_")[1]
+        if context.user_data.get("action") == "add":
+            await add_location(query, context, location_uid)
+        elif context.user_data.get("action") == "remove":
+            await remove_location(query, context, location_uid)
+    elif query.data == "back":
+        await show_regions(query, context, context.user_data.get("action", "add"))
+
+
+async def show_regions(query, context, action: str):
+    """Show available regions."""
+    context.user_data["action"] = action
+    regions = location_manager.get_regions()
+    
+    if not regions:
+        await query.edit_message_text(MESSAGES["no_locations"])
+        return
+
+    keyboard = []
+    for uid, name in sorted(regions.items(), key=lambda x: x[1]):
+        keyboard.append(
+            [InlineKeyboardButton(name, callback_data=f"region_{uid}")]
+        )
+    keyboard.append([InlineKeyboardButton(MESSAGES["back"], callback_data="back")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(MESSAGES["select_region"], reply_markup=reply_markup)
+
+
+async def show_subregions(query, context, parent_uid: str):
+    """Show subregions for selected region."""
+    context.user_data["parent_uid"] = parent_uid
+    subregions = location_manager.get_subregions(parent_uid)
+
+    # If no subregions, allow selecting the parent region itself
+    if not subregions:
+        parent_name = location_manager.get_location_name(parent_uid)
+        locations = self.get_user_locations(update.effective_user.id)
+        
+        if parent_uid in locations:
+            await query.edit_message_text(
+                MESSAGES["already_subscribed"] + f"\n\n{parent_name}"
+            )
+        else:
+            keyboard = [
+                [InlineKeyboardButton(f"✅ Підписатися на {parent_name}", 
+                                    callback_data=f"select_{parent_uid}")],
+                [InlineKeyboardButton(MESSAGES["back"], callback_data="back")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(parent_name, reply_markup=reply_markup)
+        return
+
+    keyboard = []
+    for uid, name in sorted(subregions.items(), key=lambda x: x[1]):
+        keyboard.append(
+            [InlineKeyboardButton(name, callback_data=f"select_{uid}")]
+        )
+    keyboard.append([InlineKeyboardButton(MESSAGES["back"], callback_data="back")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(MESSAGES["select_subregion"], reply_markup=reply_markup)
+
+
+async def add_location(query, context, location_uid: str):
+    """Add location to user subscriptions."""
+    user_id = query.from_user.id
+    location_name = location_manager.get_location_name(location_uid)
+
+    if user_manager.add_location(user_id, location_uid):
+        keyboard = [[InlineKeyboardButton(MESSAGES["back"], callback_data="back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            MESSAGES["added"].format(location=location_name),
+            reply_markup=reply_markup,
+        )
+    else:
+        keyboard = [[InlineKeyboardButton(MESSAGES["back"], callback_data="back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            MESSAGES["already_subscribed"] + f"\n\n{location_name}",
+            reply_markup=reply_markup,
+        )
+
+
+async def show_remove_menu(query, context):
+    """Show menu to remove locations."""
+    context.user_data["action"] = "remove"
+    regions = location_manager.get_regions()
+    
+    keyboard = []
+    for uid, name in sorted(regions.items(), key=lambda x: x[1]):
+        keyboard.append(
+            [InlineKeyboardButton(name, callback_data=f"region_{uid}")]
+        )
+    keyboard.append([InlineKeyboardButton(MESSAGES["back"], callback_data="back")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(MESSAGES["select_to_remove"], reply_markup=reply_markup)
+
+
+async def show_remove_subregions(query, context, parent_uid: str):
+    """Show subregions for removal."""
+    context.user_data["parent_uid"] = parent_uid
+    subregions = location_manager.get_subregions(parent_uid)
+    user_id = query.from_user.id
+    user_locations = user_manager.get_user_locations(user_id)
+
+    # If no subregions, allow removing the parent region itself
+    if not subregions:
+        parent_name = location_manager.get_location_name(parent_uid)
+        
+        if parent_uid not in user_locations:
+            await query.edit_message_text(
+                MESSAGES["not_subscribed"] + f"\n\n{parent_name}"
+            )
+        else:
+            keyboard = [
+                [InlineKeyboardButton(f"🗑️ Видалити {parent_name}", 
+                                    callback_data=f"select_{parent_uid}")],
+                [InlineKeyboardButton(MESSAGES["back"], callback_data="back")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(parent_name, reply_markup=reply_markup)
+        return
+
+    keyboard = []
+    for uid, name in sorted(subregions.items(), key=lambda x: x[1]):
+        # Only show locations user is subscribed to
+        if uid in user_locations:
+            keyboard.append(
+                [InlineKeyboardButton(name, callback_data=f"select_{uid}")]
+            )
+    
+    if not keyboard:
+        keyboard.append([InlineKeyboardButton(MESSAGES["no_subscriptions"], callback_data="noop")])
+    
+    keyboard.append([InlineKeyboardButton(MESSAGES["back"], callback_data="back")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(MESSAGES["select_to_remove"], reply_markup=reply_markup)
+
+
+async def remove_location(query, context, location_uid: str):
+    """Remove location from user subscriptions."""
+    user_id = query.from_user.id
+    location_name = location_manager.get_location_name(location_uid)
+
+    if user_manager.remove_location(user_id, location_uid):
+        keyboard = [[InlineKeyboardButton(MESSAGES["back"], callback_data="back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            MESSAGES["removed"].format(location=location_name),
+            reply_markup=reply_markup,
+        )
+    else:
+        keyboard = [[InlineKeyboardButton(MESSAGES["back"], callback_data="back")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            MESSAGES["not_subscribed"] + f"\n\n{location_name}",
+            reply_markup=reply_markup,
+        )
+
+
+async def show_subscriptions(query, context):
+    """Show user's current subscriptions."""
+    user_id = query.from_user.id
+    locations = user_manager.get_user_locations(user_id)
+
+    if not locations:
+        text = MESSAGES["no_subscriptions"]
+    else:
+        location_names = []
+        for uid in sorted(locations):
+            name = location_manager.get_location_name(uid)
+            if name:
+                location_names.append(f"• {name}")
+        text = MESSAGES["subscriptions"].format(locations="\n".join(location_names))
+
+    keyboard = [[InlineKeyboardButton(MESSAGES["back"], callback_data="back")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(text, reply_markup=reply_markup)
+
+
+async def alerts_poller(application: Application):
+    """Background task to poll alerts and send notifications."""
+    logger.info("Starting alerts poller")
+    
+    while True:
+        try:
+            # Poll API
+            new_alerts, last_modified = await alerts_manager.poll_alerts()
+            
+            if new_alerts and last_modified:
+                # Detect changes
+                changes = alerts_manager.detect_changes(new_alerts)
+                
+                # Send notifications to affected users
+                for location_uid, change_info in changes.items():
+                    await send_notifications(
+                        application, location_uid, change_info
+                    )
+                
+                # Save response for next comparison
+                alerts_manager.save_response(new_alerts, last_modified)
+            
+            # Wait 10 seconds before next poll
+            await asyncio.sleep(10)
+        except Exception as e:
+            logger.error(f"Error in alerts poller: {e}")
+            await asyncio.sleep(10)
+
+
+async def send_notifications(
+    application: Application, location_uid: str, change_info: Dict
+):
+    """Send notifications to users subscribed to this location."""
+    try:
+        alert = change_info["alert"]
+        alert_type = change_info["type"]
+        location_title = alert.get("location_title", "Unknown")
+        alert_level = alert.get("alert_level", "red")
+        
+        # Prepare message based on change type
+        if alert_type == "alert_cancelled":
+            message = f"{LEVEL_ICON.get(alert_level, '🟢')} {location_title}: відбій тривоги"
+        else:
+            # New alert or new threat
+            threats = alert.get("threats", [])
+            if threats:
+                # Use first threat's message
+                threat = threats[0]
+                source_msg = threat.get("source_message") or threat.get("threat_type")
+                threat_level = threat.get("level", alert_level)
+                message = f"{LEVEL_ICON.get(threat_level, '🟡')} {location_title}: {source_msg}"
+            else:
+                # No threats, just alert type
+                alert_name = ALERT_TYPE_MAP.get(alert.get("alert_type"), "Тривога")
+                message = f"{LEVEL_ICON.get(alert_level, '🟡')} {location_title}: {alert_name}"
+        
+        # Find all users subscribed to this location
+        all_users = set()
+        if USERS_CSV.exists():
+            with open(USERS_CSV, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    locations_str = row.get("locations", "")
+                    if location_uid in locations_str.split(","):
+                        try:
+                            user_id = int(row["userId"])
+                            all_users.add(user_id)
+                        except ValueError:
+                            pass
+        
+        # Send message to each user
+        for user_id in all_users:
+            try:
+                await application.bot.send_message(
+                    chat_id=user_id,
+                    text=message,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Error sending notification to {user_id}: {e}")
+    except Exception as e:
+        logger.error(f"Error preparing notifications: {e}")
+
+
+async def post_init(application: Application):
+    """Post initialization hook to start background tasks."""
+    asyncio.create_task(alerts_poller(application))
+
+
+def main():
+    """Main function to run the bot."""
+    if not TELEGRAM_BOT_TOKEN:
+        raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
+    if not ALERTS_API_TOKEN:
+        raise ValueError("ALERTS_API_TOKEN environment variable not set")
+
+    # Create application
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_callback))
+
+    # Set post_init to start background tasks
+    application.post_init = post_init
+
+    # Start polling
+    logger.info("Starting bot")
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
