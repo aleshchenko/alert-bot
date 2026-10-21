@@ -513,7 +513,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "add":
+    if query.data == "noop":
+        return
+    elif query.data == "add":
         await show_regions(query, context, "add")
     elif query.data == "remove":
         await show_remove_menu(query, context)
@@ -560,14 +562,20 @@ async def show_subregions(query, context, parent_uid: str):
     context.user_data["parent_uid"] = parent_uid
     subregions = location_manager.get_subregions(parent_uid)
 
-    # If no subregions, allow selecting the parent region itself
+    # If no subregions (e.g., Kyiv or Sevastopol), allow selecting the item directly
     if not subregions:
         parent_name = location_manager.get_location_name(parent_uid)
-        locations = self.get_user_locations(update.effective_user.id)
+        
+        # FIXED: Use user_manager instead of 'self' and query.from_user.id instead of 'update'
+        user_id = query.from_user.id
+        locations = user_manager.get_user_locations(user_id)
         
         if parent_uid in locations:
+            keyboard = [[InlineKeyboardButton(MESSAGES["back"], callback_data="back")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
-                MESSAGES["already_subscribed"] + f"\n\n{parent_name}"
+                MESSAGES["already_subscribed"] + f"\n\n{parent_name}",
+                reply_markup=reply_markup
             )
         else:
             keyboard = [
