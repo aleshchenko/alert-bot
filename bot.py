@@ -83,33 +83,14 @@ LEVEL_ICON = {
 
 
 class LocationManager:
-    """Manages location data from CSV."""
+    """Manages location data from in-memory locations_data."""
 
     def __init__(self):
         self.locations: Dict[str, Dict] = {}
         self.load_locations()
 
     def load_locations(self):
-        """Load locations from CSV file."""
-        try:
-            if not LOCATIONS_CSV.exists():
-                self._create_locations_from_data()
-            
-            with open(LOCATIONS_CSV, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    uid = row["UID"]
-                    self.locations[uid] = {
-                        "name": row["Назва"],
-                        "type": row["Тип"],
-                        "parent": row.get("Батьківська область UID", ""),
-                    }
-            logger.info(f"Loaded {len(self.locations)} locations")
-        except Exception as e:
-            logger.error(f"Error loading locations: {e}")
-
-    def _create_locations_from_data(self):
-        """Create locations CSV from embedded data."""
+        """Load locations from embedded data."""
         locations_data = [
             ("31", "м. Київ", "Місто з спеціальним статусом", ""),
             ("30", "м. Севастополь", "Місто з спеціальним статусом", ""),
@@ -266,27 +247,41 @@ class LocationManager:
             ("72", "Надвірнянський район", "Район", "13"),
             ("68", "Івано-Франківський район", "Район", "13"),
         ]
-        
-        with open(LOCATIONS_CSV, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["UID", "Назва", "Тип", "Батьківська область UID"])
-            writer.writerows(locations_data)
+
+        self.locations = {
+            uid: {
+                "name": name,
+                "type": loc_type,
+                "parent": parent_uid,
+            }
+            for uid, name, loc_type, parent_uid in locations_data
+        }
 
     def get_regions(self) -> Dict[str, str]:
-        """Get all regions (Область, Місто з спеціальним статусом)."""
-        return {
+        """
+        Get all regions (Область, Місто з спеціальним статусом), sorted alphabetically.
+        Returns a dictionary with UID as the key and region name as the value.
+        """
+        regions = {
             uid: loc["name"]
             for uid, loc in self.locations.items()
             if loc["type"] in ("Область", "Місто з спеціальним статусом")
         }
+        # Sort regions alphabetically by name
+        return dict(sorted(regions.items(), key=lambda item: item[1]))
 
     def get_subregions(self, parent_uid: str) -> Dict[str, str]:
-        """Get sub-regions (Район, hromada) for a parent region."""
-        return {
+        """
+        Get subregions (Район, Hromada) for a parent region, sorted alphabetically.
+        Returns a dictionary with UID as the key and subregion name as the value.
+        """
+        subregions = {
             uid: loc["name"]
             for uid, loc in self.locations.items()
             if loc.get("parent") == parent_uid
         }
+        # Sort subregions alphabetically by name
+        return dict(sorted(subregions.items(), key=lambda item: item[1]))
 
     def get_location_name(self, uid: str) -> Optional[str]:
         """Get location name by UID."""
