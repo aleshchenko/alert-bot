@@ -989,7 +989,8 @@ async def send_notifications(
         
         # Prepare message based on change type
         if alert_type == "alert_cancelled":
-            message = f"{LEVEL_ICON.get(alert_level, '🟢')} {location_title}: відбій тривоги"
+            # 🟢 Explicitly force the icon to green for any cancellation notification
+            message = f"🟢 {location_title}: відбій тривоги"
         else:
             # New alert or new threat
             threats = alert.get("threats", [])
