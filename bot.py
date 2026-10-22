@@ -22,6 +22,7 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
 )
+from telegram.error import Forbidden
 
 # Configure logging
 logging.basicConfig(
@@ -339,6 +340,31 @@ class UserManager:
         locations.remove(location_uid)
         self._save_user_locations(user_id, locations)
         return True
+
+    def remove_user(self, user_id: int):
+        """Completely remove a user and all their subscriptions from users.csv."""
+        self.ensure_csv_exists()
+        try:
+            rows = []
+            user_id_str = str(user_id)
+            user_removed = False
+            
+            with open(USERS_CSV, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row["userId"] != user_id_str:
+                        rows.append(row)
+                    else:
+                        user_removed = True
+                        
+            if user_removed:
+                with open(USERS_CSV, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=["userId", "locations"])
+                    writer.writeheader()
+                    writer.writerows(rows)
+                logger.info(f"Removed user {user_id} completely from users.csv (blocked/deactivated)")
+        except Exception as e:
+            logger.error(f"Error removing user {user_id} from CSV: {e}")
 
     def _save_user_locations(self, user_id: int, locations: Set[str]):
         """Save user locations to CSV."""
@@ -1036,6 +1062,9 @@ async def send_notifications(
                     text=message,
                     parse_mode="HTML"
                 )
+            except Forbidden:
+                logger.warning(f"User {user_id} has blocked the bot or deactivated account. Removing via UserManager.")
+                user_manager.remove_user(user_id)
             except Exception as e:
                 logger.error(f"Error sending notification to {user_id}: {e}")
     except Exception as e:
