@@ -750,9 +750,9 @@ async def show_regions(query, context, action: str):
         return
 
     keyboard = []
-    for uid, name in sorted(regions.items(), key=lambda x: x[1]):
+    for loc in regions:
         keyboard.append(
-            [InlineKeyboardButton(name, callback_data=f"region_{uid}")]
+            [InlineKeyboardButton(loc["name"], callback_data=f"region_{loc['uid']}")]
         )
     keyboard.append([InlineKeyboardButton(MESSAGES["back"], callback_data="back")])
     
@@ -794,9 +794,9 @@ async def show_subregions(query, context, parent_uid: str):
         [InlineKeyboardButton(f"🌐 Підписатися на всі райони ({parent_name})", callback_data=f"suball_{parent_uid}")]
     ]
     
-    for uid, name in sorted(subregions.items(), key=lambda x: x[1]):
+    for loc in subregions:
         keyboard.append(
-            [InlineKeyboardButton(name, callback_data=f"select_{uid}")]
+            [InlineKeyboardButton(loc["name"], callback_data=f"select_{loc['uid']}")]
         )
         
     keyboard.append([InlineKeyboardButton(MESSAGES["back"], callback_data="back")])
