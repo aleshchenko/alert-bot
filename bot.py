@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 # Environment variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALERTS_API_TOKEN = os.getenv("ALERTS_API_TOKEN")
+BACKUP_CHAT_ID = os.getenv("BACKUP_CHAT_ID")
 ALERTS_API_URL = "https://api.alerts.in.ua/v1/alerts/active.json"
 
 # File paths
@@ -508,6 +509,82 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(MESSAGES["start"], reply_markup=reply_markup)
 
+BACKUP_CHAT_ID = os.getenv("BACKUP_CHAT_ID")
+
+def restore_users_from_telegram_sync():
+    """Synchronously restore users.csv from Telegram on startup before bot boots up."""
+    if not BACKUP_CHAT_ID or not TELEGRAM_BOT_TOKEN:
+        logger.warning("BACKUP_CHAT_ID or TELEGRAM_BOT_TOKEN not set. Skipping Telegram restore.")
+        return
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+        
+        # 1. Get chat info to check for a pinned backup message
+        chat_res = httpx.get(f"{url}/getChat", params={"chat_id": BACKUP_CHAT_ID}, timeout=10.0).json()
+        if not chat_res.get("ok"):
+            logger.error(f"Failed to get backup chat: {chat_res}")
+            return
+            
+        pinned_msg = chat_res.get("result", {}).get("pinned_message")
+        if not pinned_msg or not pinned_msg.get("document"):
+            logger.info("No pinned backup document found in BACKUP_CHAT_ID. Starting with fresh users.csv.")
+            return
+            
+        file_id = pinned_msg["document"]["file_id"]
+        
+        # 2. Get file path from Telegram servers
+        file_res = httpx.get(f"{url}/getFile", params={"file_id": file_id}, timeout=10.0).json()
+        if not file_res.get("ok"):
+            logger.error(f"Failed to get file path: {file_res}")
+            return
+            
+        file_path = file_res["result"]["file_path"]
+        
+        # 3. Download the actual CSV bytes
+        download_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+        file_data = httpx.get(download_url, timeout=30.0).content
+        
+        # 4. Overwrite local users.csv with restored data
+        with open(USERS_CSV, "wb") as f:
+            f.write(file_data)
+            
+        logger.info("Successfully restored users.csv from Telegram backup!")
+    except Exception as e:
+        logger.error(f"Error restoring users from Telegram: {e}")
+
+
+async def backup_worker(application: Application):
+    """Periodically backs up users.csv to a private Telegram chat/channel."""
+    if not BACKUP_CHAT_ID:
+        logger.info("BACKUP_CHAT_ID not set. Periodic backups are disabled.")
+        return
+
+    logger.info("Starting backup worker")
+    # Wait 1 minute after startup before the first backup
+    await asyncio.sleep(60)
+
+    while True:
+        try:
+            if USERS_CSV.exists() and USERS_CSV.stat().st_size > 0:
+                with open(USERS_CSV, "rb") as f:
+                    sent_message = await application.bot.send_document(
+                        chat_id=BACKUP_CHAT_ID,
+                        document=f,
+                        filename="users.csv",
+                        caption=f"🛡️ Automatic DB Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                    )
+                # Pin the latest backup message so it can be easily retrieved on the next reboot
+                await application.bot.pin_chat_message(chat_id=BACKUP_CHAT_ID, message_id=sent_message.message_id)
+                logger.info("Successfully sent and pinned users.csv backup to Telegram.")
+            else:
+                logger.warning("users.csv is missing or empty. Skipping backup.")
+        except Exception as e:
+            logger.error(f"Error in backup worker: {e}")
+
+        # Run backup every 3 hours (3 * 3600 seconds) or adjust to your liking (e.g., 3600 for 1 hour)
+        await asyncio.sleep(3 * 3600)
+
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button presses."""
@@ -906,6 +983,7 @@ async def post_init(application: Application):
     
     # Start your bot's other background tasks (like alerts poller)
     asyncio.create_task(alerts_poller(application))
+    asyncio.create_task(backup_worker(application))
 
 
 def main():
@@ -914,6 +992,9 @@ def main():
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set")
     if not ALERTS_API_TOKEN:
         raise ValueError("ALERTS_API_TOKEN environment variable not set")
+
+    # 📌 1. Restore database from Telegram before bot boots up
+    restore_users_from_telegram_sync()
 
     # Create application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
