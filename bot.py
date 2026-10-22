@@ -87,10 +87,12 @@ class LocationManager:
 
     def __init__(self):
         self.locations: Dict[str, Dict] = {}
+        self.sorted_regions: Dict[str, str] = {}  # Cached sorted regions
+        self.sorted_subregions: Dict[str, Dict[str, str]] = {}  # Cached sorted subregions by parent UID
         self.load_locations()
 
     def load_locations(self):
-        """Load locations from embedded data."""
+        """Load locations from embedded data and sort them."""
         locations_data = [
             ("31", "м. Київ", "Місто з спеціальним статусом", ""),
             ("30", "м. Севастополь", "Місто з спеціальним статусом", ""),
@@ -248,6 +250,7 @@ class LocationManager:
             ("68", "Івано-Франківський район", "Район", "13"),
         ]
 
+        # Load locations into memory
         self.locations = {
             uid: {
                 "name": name,
@@ -257,31 +260,44 @@ class LocationManager:
             for uid, name, loc_type, parent_uid in locations_data
         }
 
-    def get_regions(self) -> Dict[str, str]:
-        """
-        Get all regions (Область, Місто з спеціальним статусом), sorted alphabetically.
-        Returns a dictionary with UID as the key and region name as the value.
-        """
-        regions = {
+        # Sort and cache regions
+        self.sorted_regions = {
             uid: loc["name"]
-            for uid, loc in self.locations.items()
+            for uid, loc in sorted(
+                self.locations.items(),
+                key=lambda item: item[1]["name"]
+            )
             if loc["type"] in ("Область", "Місто з спеціальним статусом")
         }
-        # Sort regions alphabetically by name
-        return dict(sorted(regions.items(), key=lambda item: item[1]))
+
+        # Sort and cache subregions by parent UID
+        self.sorted_subregions = {}
+        for uid, loc in self.locations.items():
+            parent_uid = loc.get("parent")
+            if parent_uid:
+                if parent_uid not in self.sorted_subregions:
+                    self.sorted_subregions[parent_uid] = {}
+                self.sorted_subregions[parent_uid][uid] = loc["name"]
+
+        # Sort subregions for each parent UID
+        for parent_uid, subregions in self.sorted_subregions.items():
+            self.sorted_subregions[parent_uid] = dict(
+                sorted(subregions.items(), key=lambda item: item[1])
+            )
+
+    def get_regions(self) -> Dict[str, str]:
+        """
+        Get all regions (Область, Місто з спеціальним статусом).
+        Returns a dictionary with UID as the key and region name as the value.
+        """
+        return self.sorted_regions
 
     def get_subregions(self, parent_uid: str) -> Dict[str, str]:
         """
-        Get subregions (Район, Hromada) for a parent region, sorted alphabetically.
+        Get subregions (Район, Hromada) for a parent region.
         Returns a dictionary with UID as the key and subregion name as the value.
         """
-        subregions = {
-            uid: loc["name"]
-            for uid, loc in self.locations.items()
-            if loc.get("parent") == parent_uid
-        }
-        # Sort subregions alphabetically by name
-        return dict(sorted(subregions.items(), key=lambda item: item[1]))
+        return self.sorted_subregions.get(parent_uid, {})
 
     def get_location_name(self, uid: str) -> Optional[str]:
         """Get location name by UID."""
