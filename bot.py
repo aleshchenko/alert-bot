@@ -587,6 +587,16 @@ async def _perform_backup(application: Application, backup_type: str = "automati
 
     try:
         if USERS_CSV.exists() and USERS_CSV.stat().st_size > 0:
+            # 1. Fetch current chat info to see if there is already a pinned message
+            old_pinned_message_id = None
+            try:
+                chat_info = await application.bot.get_chat(chat_id=BACKUP_CHAT_ID)
+                if chat_info.pinned_message:
+                    old_pinned_message_id = chat_info.pinned_message.message_id
+            except Exception as e:
+                logger.debug(f"Could not retrieve existing pinned message: {e}")
+
+            # 2. Send the new backup document
             with open(USERS_CSV, "rb") as f:
                 caption = f"{'🛡️ Automatic' if backup_type == 'automatic' else '👨‍💻 Manual'} DB Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
                 sent_message = await application.bot.send_document(
@@ -595,9 +605,25 @@ async def _perform_backup(application: Application, backup_type: str = "automati
                     filename="users.csv",
                     caption=caption
                 )
-            # Pin the latest backup message so it can be easily retrieved on the next reboot
-            await application.bot.pin_chat_message(chat_id=BACKUP_CHAT_ID, message_id=sent_message.message_id)
-            logger.info(f"Successfully sent and pinned {backup_type} users.csv backup to Telegram.")
+            
+            # 3. Pin the new backup message
+            await application.bot.pin_chat_message(
+                chat_id=BACKUP_CHAT_ID, 
+                message_id=sent_message.message_id,
+                disable_notification=True  # Keeps notifications quiet
+            )
+            
+            # 4. Unpin the old backup message to prevent clutter
+            if old_pinned_message_id:
+                try:
+                    await application.bot.unpin_chat_message(
+                        chat_id=BACKUP_CHAT_ID, 
+                        message_id=old_pinned_message_id
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not unpin old message {old_pinned_message_id}: {e}")
+
+            logger.info(f"Successfully sent, pinned, and cleaned up {backup_type} users.csv backup in Telegram.")
             return True
         else:
             logger.warning("users.csv is missing or empty. Skipping backup.")
