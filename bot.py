@@ -92,7 +92,7 @@ class LocationManager:
         self.load_locations()
 
     def load_locations(self):
-        """Load locations from embedded data and sort them."""
+        """Load locations from embedded data and sort them alphabetically."""
         locations_data = [
             ("31", "м. Київ", "Місто з спеціальним статусом", ""),
             ("30", "м. Севастополь", "Місто з спеціальним статусом", ""),
@@ -260,17 +260,20 @@ class LocationManager:
             for uid, name, loc_type, parent_uid in locations_data
         }
 
-        # Sort and cache regions
+        # Sort and cache regions alphabetically by name
         self.sorted_regions = {
             uid: loc["name"]
             for uid, loc in sorted(
                 self.locations.items(),
-                key=lambda item: item[1]["name"]
+                key=lambda item: item[1]["name"].lower()  # Sort ignoring case
             )
             if loc["type"] in ("Область", "Місто з спеціальним статусом")
         }
 
-        # Sort and cache subregions by parent UID
+        # Move the first region (Автономна Республіка Крим) to the end of the sorted list
+        self.sorted_regions = {**dict(list(self.sorted_regions.items())[1:]), **dict(list(self.sorted_regions.items())[:1])}
+
+        # Sort and cache subregions by parent UID, alphabetically ignoring case
         self.sorted_subregions = {}
         for uid, loc in self.locations.items():
             parent_uid = loc.get("parent")
@@ -282,7 +285,7 @@ class LocationManager:
         # Sort subregions for each parent UID
         for parent_uid, subregions in self.sorted_subregions.items():
             self.sorted_subregions[parent_uid] = dict(
-                sorted(subregions.items(), key=lambda item: item[1])
+                sorted(subregions.items(), key=lambda item: item[1].lower())  # Sort ignoring case
             )
 
     def get_regions(self) -> Dict[str, str]:
