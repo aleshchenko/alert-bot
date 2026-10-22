@@ -24,6 +24,11 @@ from telegram.ext import (
 )
 from telegram.error import Forbidden
 
+import locale
+
+# Set locale to handle Cyrillic (e.g., Ukrainian)
+locale.setlocale(locale.LC_ALL, 'uk_UA.UTF-8')
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -265,7 +270,9 @@ class LocationManager:
             uid: loc["name"]
             for uid, loc in sorted(
                 self.locations.items(),
-                key=lambda item: item[1]["name"].lower()  # Sort ignoring case
+                key=lambda item: locale.strxfrm(
+                    item[1]["name"][3:].lower() if item[1]["name"].startswith("м. ") else item[1]["name"].lower()  # Locale-aware sorting
+                )
             )
             if loc["type"] in ("Область", "Місто з спеціальним статусом")
         }
@@ -285,7 +292,7 @@ class LocationManager:
         # Sort subregions for each parent UID
         for parent_uid, subregions in self.sorted_subregions.items():
             self.sorted_subregions[parent_uid] = dict(
-                sorted(subregions.items(), key=lambda item: item[1].lower())  # Sort ignoring case
+                sorted(subregions.items(), key=lambda item: locale.strxfrm(item[1].lower()))  # Sort ignoring case
             )
 
     def get_regions(self) -> Dict[str, str]:
