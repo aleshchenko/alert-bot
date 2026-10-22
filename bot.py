@@ -87,9 +87,10 @@ class LocationManager:
     """Manages location data from in-memory locations_data."""
 
     def __init__(self):
-        self.locations: Dict[str, Dict] = {}
-        self.regions: Dict[str, str] = {}  # Pre-sorted regions
-        self.subregions: Dict[str, Dict[str, str]] = {}  # Pre-sorted subregions grouped by parent UID
+        self.locations: List[Dict] = []  # Use a list to maintain the order of locations_data
+        self.locations_by_uid: Dict[str, Dict] = {}  # Map for efficient UID lookup
+        self.regions: List[Dict] = []  # Cached sorted regions
+        self.subregions: Dict[str, List[Dict]] = {}  # Cached sorted subregions grouped by parent UID
         self.load_locations()
 
     def load_locations(self):
@@ -252,49 +253,51 @@ class LocationManager:
             ("56", "Покровський район", "Район", "28"),
         ]
 
-        # Load locations into memory
-        self.locations = {
-            uid: {
+        # Load locations into memory as a list and a dictionary for O(1) lookup
+        self.locations = [
+            {
+                "uid": uid,
                 "name": name,
                 "type": loc_type,
                 "parent": parent_uid,
             }
             for uid, name, loc_type, parent_uid in locations_data
-        }
+        ]
+        self.locations_by_uid = {loc["uid"]: loc for loc in self.locations}
 
         # Cache regions (pre-sorted order)
-        self.regions = {
-            uid: loc["name"]
-            for uid, loc in self.locations.items()
-            if loc["parent"] == ""  # Regions without parent
-        }
+        self.regions = [
+            loc for loc in self.locations if loc["parent"] == ""  # Regions without parent
+        ]
 
         # Cache subregions grouped by parent UID (pre-sorted order)
         self.subregions = {}
-        for uid, loc in self.locations.items():
+        for loc in self.locations:
             parent_uid = loc.get("parent")
             if parent_uid:
                 if parent_uid not in self.subregions:
-                    self.subregions[parent_uid] = {}
-                self.subregions[parent_uid][uid] = loc["name"]
+                    self.subregions[parent_uid] = []
+                self.subregions[parent_uid].append(loc)
 
-    def get_regions(self) -> Dict[str, str]:
+    def get_regions(self) -> List[Dict]:
         """
         Get all regions (Область, Місто з спеціальним статусом).
-        Returns a dictionary with UID as the key and region name as the value.
+        Returns a list of dictionaries representing regions.
         """
         return self.regions
 
-    def get_subregions(self, parent_uid: str) -> Dict[str, str]:
+    def get_subregions(self, parent_uid: str) -> List[Dict]:
         """
         Get subregions (Район, Hromada) for a parent region.
-        Returns a dictionary with UID as the key and subregion name as the value.
+        Returns a list of dictionaries representing subregions.
         """
-        return self.subregions.get(parent_uid, {})
+        return self.subregions.get(parent_uid, [])
 
     def get_location_name(self, uid: str) -> Optional[str]:
         """Get location name by UID."""
-        return self.locations.get(uid, {}).get("name")
+        # Use the prebuilt dictionary for O(1) lookup
+        location = self.locations_by_uid.get(uid)
+        return location["name"] if location else None
 
 
 class UserManager:
