@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALERTS_API_TOKEN = os.getenv("ALERTS_API_TOKEN")
 BACKUP_CHAT_ID = os.getenv("BACKUP_CHAT_ID")
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))
 ALERTS_API_URL = "https://api.alerts.in.ua/v1/alerts/active.json"
 
 # File paths
@@ -509,7 +510,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(MESSAGES["start"], reply_markup=reply_markup)
 
-BACKUP_CHAT_ID = os.getenv("BACKUP_CHAT_ID")
+
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Secret admin command to manually backup users.csv."""
+    user_id = update.effective_user.id
+    
+    # Only allow admin user
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ Unauthorized. This command is only available to administrators.")
+        logger.warning(f"Unauthorized backup attempt from user {user_id}")
+        return
+    
+    await update.message.reply_text("⏳ Performing manual backup...")
+    
+    success = await _perform_backup(context.application, backup_type="manual")
+    
+    if success:
+        await update.message.reply_text("✅ Manual backup completed successfully!")
+    else:
+        await update.message.reply_text("❌ Backup failed. Check logs for details.")
+
 
 def restore_users_from_telegram_sync():
     """Synchronously restore users.csv from Telegram on startup before bot boots up."""
@@ -554,8 +574,41 @@ def restore_users_from_telegram_sync():
         logger.error(f"Error restoring users from Telegram: {e}")
 
 
+async def _perform_backup(application: Application, backup_type: str = "automatic"):
+    """Helper function to perform backup of users.csv to Telegram.
+    
+    Args:
+        application: Telegram bot application
+        backup_type: Either "automatic" or "manual"
+    """
+    if not BACKUP_CHAT_ID:
+        logger.warning("BACKUP_CHAT_ID not set. Cannot backup.")
+        return False
+
+    try:
+        if USERS_CSV.exists() and USERS_CSV.stat().st_size > 0:
+            with open(USERS_CSV, "rb") as f:
+                caption = f"{'🛡️ Automatic' if backup_type == 'automatic' else '👨‍💻 Manual'} DB Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                sent_message = await application.bot.send_document(
+                    chat_id=BACKUP_CHAT_ID,
+                    document=f,
+                    filename="users.csv",
+                    caption=caption
+                )
+            # Pin the latest backup message so it can be easily retrieved on the next reboot
+            await application.bot.pin_chat_message(chat_id=BACKUP_CHAT_ID, message_id=sent_message.message_id)
+            logger.info(f"Successfully sent and pinned {backup_type} users.csv backup to Telegram.")
+            return True
+        else:
+            logger.warning("users.csv is missing or empty. Skipping backup.")
+            return False
+    except Exception as e:
+        logger.error(f"Error in backup: {e}")
+        return False
+
+
 async def backup_worker(application: Application):
-    """Periodically backs up users.csv to a private Telegram chat/channel."""
+    """Periodically backs up users.csv to a private Telegram chat/channel, only on user count changes."""
     if not BACKUP_CHAT_ID:
         logger.info("BACKUP_CHAT_ID not set. Periodic backups are disabled.")
         return
@@ -564,26 +617,29 @@ async def backup_worker(application: Application):
     # Wait 1 minute after startup before the first backup
     await asyncio.sleep(60)
 
+    last_user_count = 0
+
     while True:
         try:
-            if USERS_CSV.exists() and USERS_CSV.stat().st_size > 0:
-                with open(USERS_CSV, "rb") as f:
-                    sent_message = await application.bot.send_document(
-                        chat_id=BACKUP_CHAT_ID,
-                        document=f,
-                        filename="users.csv",
-                        caption=f"🛡️ Automatic DB Backup: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
-                    )
-                # Pin the latest backup message so it can be easily retrieved on the next reboot
-                await application.bot.pin_chat_message(chat_id=BACKUP_CHAT_ID, message_id=sent_message.message_id)
-                logger.info("Successfully sent and pinned users.csv backup to Telegram.")
+            # Count current users in CSV
+            current_user_count = 0
+            if USERS_CSV.exists():
+                with open(USERS_CSV, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    current_user_count = sum(1 for _ in reader)
+
+            # Only backup if user count changed
+            if current_user_count != last_user_count:
+                logger.info(f"User count changed from {last_user_count} to {current_user_count}. Triggering backup.")
+                await _perform_backup(application, backup_type="automatic")
+                last_user_count = current_user_count
             else:
-                logger.warning("users.csv is missing or empty. Skipping backup.")
+                logger.debug(f"User count unchanged ({current_user_count}). Skipping backup.")
         except Exception as e:
             logger.error(f"Error in backup worker: {e}")
 
-        # Run backup every 3 hours (3 * 3600 seconds) or adjust to your liking (e.g., 3600 for 1 hour)
-        await asyncio.sleep(3 * 3600)
+        # Check every 1 hour for user count changes
+        await asyncio.sleep(3600)
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1001,6 +1057,7 @@ def main():
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("backup", backup_command))
     application.add_handler(CallbackQueryHandler(button_callback))
 
     # Set post_init to start background tasks
