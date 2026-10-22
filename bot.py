@@ -608,7 +608,7 @@ async def show_subregions(query, context, parent_uid: str):
 
 
 async def subscribe_all_subregions(query, context, parent_uid: str):
-    """Subscribe user to all subregions of a given parent region."""
+    """Subscribe user to all subregions of a given parent region and send active alerts."""
     user_id = query.from_user.id
     subregions = location_manager.get_subregions(parent_uid)
     parent_name = location_manager.get_location_name(parent_uid)
@@ -617,6 +617,8 @@ async def subscribe_all_subregions(query, context, parent_uid: str):
     for uid in subregions.keys():
         if user_manager.add_location(user_id, uid):
             added_count += 1
+            # NEW: Send active status for each newly added subregion if alerts are active
+            await send_current_status_if_any(context.bot, user_id, uid)
 
     keyboard = [[InlineKeyboardButton(MESSAGES["back"], callback_data="back")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -628,12 +630,45 @@ async def subscribe_all_subregions(query, context, parent_uid: str):
 
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
+
+async def send_current_status_if_any(bot, user_id: int, location_uid: str):
+    """Check if there is an active alert for a location and send it to the user upon subscribing."""
+    try:
+        active_alert = alerts_manager.last_response.get(location_uid)
+        if not active_alert:
+            message = f"✅ <b>Поточний статус:</b>\n{LEVEL_ICON.get('green', '🟢')} {location_title}: немає тривоги"
+        else:  # No active alert for this location right now
+            location_title = active_alert.get("location_title", "Unknown")
+            alert_level = active_alert.get("alert_level", "red")
+            
+            threats = active_alert.get("threats", [])
+            if threats:
+                threat = threats[0]
+                source_msg = threat.get("source_message") or threat.get("threat_type")
+                threat_level = threat.get("level", alert_level)
+                message = f"🚨 <b>Поточний статус:</b>\n{LEVEL_ICON.get(threat_level, '🟡')} {location_title}: {source_msg}"
+            else:
+                alert_name = ALERT_TYPE_MAP.get(active_alert.get("alert_type"), "Тривога")
+                message = f"🚨 <b>Поточний статус:</b>\n{LEVEL_ICON.get(alert_level, '🟡')} {location_title}: {alert_name}"
+
+        await bot.send_message(
+            chat_id=user_id,
+            text=message,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error sending initial status for location {location_uid} to user {user_id}: {e}")
+
+
 async def add_location(query, context, location_uid: str):
     """Add location to user subscriptions."""
     user_id = query.from_user.id
     location_name = location_manager.get_location_name(location_uid)
 
     if user_manager.add_location(user_id, location_uid):
+        # NEW: Check and send current status if an alert is active right now
+        await send_current_status_if_any(context.bot, user_id, location_uid)
+
         keyboard = [[InlineKeyboardButton(MESSAGES["back"], callback_data="back")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
