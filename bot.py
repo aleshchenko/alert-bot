@@ -635,12 +635,18 @@ async def send_current_status_if_any(bot, user_id: int, location_uid: str):
     """Check if there is an active alert for a location and send it to the user upon subscribing."""
     try:
         active_alert = alerts_manager.last_response.get(location_uid)
+        
+        # Define location_title safely beforehand
+        location_title = (
+            (active_alert.get("location_title") if active_alert else None) 
+            or location_manager.get_location_name(location_uid) 
+            or "Локація"
+        )
+
         if not active_alert:
             message = f"✅ <b>Поточний статус:</b>\n{LEVEL_ICON.get('green', '🟢')} {location_title}: немає тривоги"
-        else:  # No active alert for this location right now
-            location_title = active_alert.get("location_title", "Unknown")
+        else:
             alert_level = active_alert.get("alert_level", "red")
-            
             threats = active_alert.get("threats", [])
             if threats:
                 threat = threats[0]
