@@ -528,6 +528,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_subregions(query, context, parent_uid)
         elif context.user_data.get("action") == "remove":
             await show_remove_subregions(query, context, parent_uid)
+    elif query.data.startswith("suball_"):
+        # NEW: Handle subscribing to all child locations
+        parent_uid = query.data.split("_")[1]
+        await subscribe_all_subregions(query, context, parent_uid)
     elif query.data.startswith("select_"):
         location_uid = query.data.split("_")[1]
         if context.user_data.get("action") == "add":
@@ -559,15 +563,14 @@ async def show_regions(query, context, action: str):
 
 
 async def show_subregions(query, context, parent_uid: str):
-    """Show subregions for selected region."""
+    """Show subregions for selected region with 'Subscribe to all' as the first option (only if children exist)."""
     context.user_data["parent_uid"] = parent_uid
     subregions = location_manager.get_subregions(parent_uid)
+    parent_name = location_manager.get_location_name(parent_uid)
 
-    # If no subregions (e.g., Kyiv or Sevastopol), allow selecting the item directly
+    # If there are NO child locations (e.g., Kyiv, Sevastopol), skip "Subscribe to all" 
+    # and show direct subscription/status option.
     if not subregions:
-        parent_name = location_manager.get_location_name(parent_uid)
-        
-        # FIXED: Use user_manager instead of 'self' and query.from_user.id instead of 'update'
         user_id = query.from_user.id
         locations = user_manager.get_user_locations(user_id)
         
@@ -588,16 +591,42 @@ async def show_subregions(query, context, parent_uid: str):
             await query.edit_message_text(parent_name, reply_markup=reply_markup)
         return
 
-    keyboard = []
+    # If subregions DO exist, show "Subscribe to all" as the FIRST option, followed by individual districts
+    keyboard = [
+        [InlineKeyboardButton(f"🌐 Підписатися на всі райони ({parent_name})", callback_data=f"suball_{parent_uid}")]
+    ]
+    
     for uid, name in sorted(subregions.items(), key=lambda x: x[1]):
         keyboard.append(
             [InlineKeyboardButton(name, callback_data=f"select_{uid}")]
         )
+        
     keyboard.append([InlineKeyboardButton(MESSAGES["back"], callback_data="back")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(MESSAGES["select_subregion"], reply_markup=reply_markup)
 
+
+async def subscribe_all_subregions(query, context, parent_uid: str):
+    """Subscribe user to all subregions of a given parent region."""
+    user_id = query.from_user.id
+    subregions = location_manager.get_subregions(parent_uid)
+    parent_name = location_manager.get_location_name(parent_uid)
+    
+    added_count = 0
+    for uid in subregions.keys():
+        if user_manager.add_location(user_id, uid):
+            added_count += 1
+
+    keyboard = [[InlineKeyboardButton(MESSAGES["back"], callback_data="back")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if added_count > 0:
+        text = f"✅ Успішно підписано на всі локації ({added_count}) регіону:\n<b>{parent_name}</b>"
+    else:
+        text = f"⚠️ Ви вже підписані на всі локації регіону:\n<b>{parent_name}</b>"
+
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 async def add_location(query, context, location_uid: str):
     """Add location to user subscriptions."""
