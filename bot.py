@@ -24,10 +24,7 @@ from telegram.ext import (
 )
 from telegram.error import Forbidden
 
-import locale
-
-# Set locale to handle Cyrillic (e.g., Ukrainian)
-locale.setlocale(locale.LC_ALL, 'uk_UA.UTF-8')
+from pyuca import Collator
 
 # Configure logging
 logging.basicConfig(
@@ -94,6 +91,7 @@ class LocationManager:
         self.locations: Dict[str, Dict] = {}
         self.sorted_regions: Dict[str, str] = {}  # Cached sorted regions
         self.sorted_subregions: Dict[str, Dict[str, str]] = {}  # Cached sorted subregions by parent UID
+        self.collator = Collator()  # Unicode Collator for proper sorting
         self.load_locations()
 
     def load_locations(self):
@@ -270,7 +268,7 @@ class LocationManager:
             uid: loc["name"]
             for uid, loc in sorted(
                 self.locations.items(),
-                key=lambda item: locale.strxfrm(
+                key=lambda item: self.collator.sort_key(
                     item[1]["name"][3:].lower() if item[1]["name"].startswith("м. ") else item[1]["name"].lower()  # Locale-aware sorting
                 )
             )
@@ -292,7 +290,7 @@ class LocationManager:
         # Sort subregions for each parent UID
         for parent_uid, subregions in self.sorted_subregions.items():
             self.sorted_subregions[parent_uid] = dict(
-                sorted(subregions.items(), key=lambda item: locale.strxfrm(item[1].lower()))  # Sort ignoring case
+                sorted(subregions.items(), key=lambda item: self.collator.sort_key(item[1].lower()))  # Sort ignoring case
             )
 
     def get_regions(self) -> Dict[str, str]:
