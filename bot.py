@@ -1107,7 +1107,19 @@ async def post_init(application: Application):
 
     # Start the web server so Render sees incoming activity
     await start_web_server()
-    
+
+    # Perform an initial poll to save the current state of alerts without sending notifications
+    try:
+        logger.info("Performing initial alerts poll to prevent notifications on restart...")
+        new_alerts, last_modified = await alerts_manager.poll_alerts()
+        if new_alerts and last_modified:
+            alerts_manager.save_response(new_alerts, last_modified)
+            logger.info("Initial alerts state saved successfully.")
+        else:
+            logger.info("No alerts or no updates from the API.")
+    except Exception as e:
+        logger.error(f"Error during initial alerts poll: {e}")
+
     # Start your bot's other background tasks (like alerts poller)
     asyncio.create_task(alerts_poller(application))
     asyncio.create_task(backup_worker(application))
