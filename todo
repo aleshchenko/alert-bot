@@ -1,0 +1,4 @@
+store users preferences copy in remote file and read from it
+store last api response + timestamp in remote file
+check why it's not sending current status when subscribed to a new location
+check how to handle deleted users

@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from aiohttp import web
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommand
@@ -808,9 +809,32 @@ async def set_bot_commands(application: Application):
     ]
     await application.bot.set_my_commands(commands)
 
+async def handle_ping(request):
+    """Simple health-check endpoint to keep Render awake."""
+    return web.Response(text="I am alive!")
+
+async def start_web_server():
+    """Starts a lightweight web server for Render's port binding."""
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Render assigns a port via the PORT environment variable (defaults to 10000)
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"Web server started on port {port}")
+
 async def post_init(application: Application):
     """Post initialization hook to start background tasks."""
     await set_bot_commands(application)
+
+    # Start the web server so Render sees incoming activity
+    await start_web_server()
+    
+    # Start your bot's other background tasks (like alerts poller)
     asyncio.create_task(alerts_poller(application))
 
 
