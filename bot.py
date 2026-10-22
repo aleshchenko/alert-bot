@@ -806,11 +806,12 @@ async def show_subregions(query, context, parent_uid: str):
 async def subscribe_all_subregions(query, context, parent_uid: str):
     """Subscribe user to all subregions of a given parent region and send active alerts."""
     user_id = query.from_user.id
-    subregions = location_manager.get_subregions(parent_uid)
+    subregions = location_manager.get_subregions(parent_uid)  # This is a list of dicts
     parent_name = location_manager.get_location_name(parent_uid)
     
     added_count = 0
-    for uid in subregions.keys():
+    for loc in subregions:  # Iterate over the list directly
+        uid = loc["uid"]  # Access "uid" from each dictionary
         if user_manager.add_location(user_id, uid):
             added_count += 1
             # NEW: Send active status for each newly added subregion if alerts are active
@@ -892,9 +893,9 @@ async def show_remove_menu(query, context):
     regions = location_manager.get_regions()
     
     keyboard = []
-    for uid, name in sorted(regions.items(), key=lambda x: x[1]):
+    for loc in sorted(regions, key=lambda x: x["name"]):
         keyboard.append(
-            [InlineKeyboardButton(name, callback_data=f"region_{uid}")]
+            [InlineKeyboardButton(loc["name"], callback_data=f"region_{loc['uid']}")]
         )
     keyboard.append([InlineKeyboardButton(MESSAGES["back"], callback_data="back")])
     
@@ -928,11 +929,11 @@ async def show_remove_subregions(query, context, parent_uid: str):
         return
 
     keyboard = []
-    for uid, name in sorted(subregions.items(), key=lambda x: x[1]):
+    for loc in subregions:  # Iterate over list of dictionaries
         # Only show locations user is subscribed to
-        if uid in user_locations:
+        if loc["uid"] in user_locations:
             keyboard.append(
-                [InlineKeyboardButton(name, callback_data=f"select_{uid}")]
+                [InlineKeyboardButton(loc["name"], callback_data=f"select_{loc['uid']}")]
             )
     
     if not keyboard:
