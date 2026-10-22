@@ -679,13 +679,14 @@ async def backup_worker(application: Application):
         return
 
     logger.info("Starting backup worker")
-    # Wait 1 minute after startup before the first backup
-    await asyncio.sleep(60)
 
     last_user_count = 0
 
     while True:
         try:
+            # Check every 1 hour for user count changes
+            await asyncio.sleep(3600)
+
             # Count current users in CSV
             current_user_count = 0
             if USERS_CSV.exists():
@@ -702,9 +703,6 @@ async def backup_worker(application: Application):
                 logger.debug(f"User count unchanged ({current_user_count}). Skipping backup.")
         except Exception as e:
             logger.error(f"Error in backup worker: {e}")
-
-        # Check every 1 hour for user count changes
-        await asyncio.sleep(3600)
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
