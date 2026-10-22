@@ -24,7 +24,6 @@ from telegram.ext import (
 )
 from telegram.error import Forbidden
 
-from pyuca import Collator
 
 # Configure logging
 logging.basicConfig(
@@ -89,13 +88,12 @@ class LocationManager:
 
     def __init__(self):
         self.locations: Dict[str, Dict] = {}
-        self.sorted_regions: Dict[str, str] = {}  # Cached sorted regions
-        self.sorted_subregions: Dict[str, Dict[str, str]] = {}  # Cached sorted subregions by parent UID
-        self.collator = Collator()  # Unicode Collator for proper sorting
+        self.regions: Dict[str, str] = {}  # Pre-sorted regions
+        self.subregions: Dict[str, Dict[str, str]] = {}  # Pre-sorted subregions grouped by parent UID
         self.load_locations()
 
     def load_locations(self):
-        """Load locations from embedded data and sort them alphabetically."""
+        """Load pre-sorted locations from embedded data."""
         locations_data = [
             ("4", "Вінницька область", "Область", ""),
             ("8", "Волинська область", "Область", ""),
@@ -124,6 +122,7 @@ class LocationManager:
             ("25", "Чернігівська область", "Область", ""),
             ("29", "Автономна Республіка Крим", "Область", ""),
             ("30", "м. Севастополь", "Місто з спеціальним статусом", ""),
+            # Subregions (pre-sorted within their parent regions)
             ("135", "Кам'янець-Подільський район", "Район", "3"),
             ("134", "Хмельницький район", "Район", "3"),
             ("136", "Шепетівський район", "Район", "3"),
@@ -263,49 +262,35 @@ class LocationManager:
             for uid, name, loc_type, parent_uid in locations_data
         }
 
-        # Sort and cache regions alphabetically by name
-        self.sorted_regions = {
+        # Cache regions (pre-sorted order)
+        self.regions = {
             uid: loc["name"]
-            for uid, loc in sorted(
-                self.locations.items(),
-                key=lambda item: self.collator.sort_key(
-                    item[1]["name"][3:].lower() if item[1]["name"].startswith("м. ") else item[1]["name"].lower()  # Locale-aware sorting
-                )
-            )
-            if loc["type"] in ("Область", "Місто з спеціальним статусом")
+            for uid, loc in self.locations.items()
+            if loc["parent"] == ""  # Regions without parent
         }
 
-        # Move the first region (Автономна Республіка Крим) to the end of the sorted list
-        self.sorted_regions = {**dict(list(self.sorted_regions.items())[1:]), **dict(list(self.sorted_regions.items())[:1])}
-
-        # Sort and cache subregions by parent UID, alphabetically ignoring case
-        self.sorted_subregions = {}
+        # Cache subregions grouped by parent UID (pre-sorted order)
+        self.subregions = {}
         for uid, loc in self.locations.items():
             parent_uid = loc.get("parent")
             if parent_uid:
-                if parent_uid not in self.sorted_subregions:
-                    self.sorted_subregions[parent_uid] = {}
-                self.sorted_subregions[parent_uid][uid] = loc["name"]
-
-        # Sort subregions for each parent UID
-        for parent_uid, subregions in self.sorted_subregions.items():
-            self.sorted_subregions[parent_uid] = dict(
-                sorted(subregions.items(), key=lambda item: self.collator.sort_key(item[1].lower()))  # Sort ignoring case
-            )
+                if parent_uid not in self.subregions:
+                    self.subregions[parent_uid] = {}
+                self.subregions[parent_uid][uid] = loc["name"]
 
     def get_regions(self) -> Dict[str, str]:
         """
         Get all regions (Область, Місто з спеціальним статусом).
         Returns a dictionary with UID as the key and region name as the value.
         """
-        return self.sorted_regions
+        return self.regions
 
     def get_subregions(self, parent_uid: str) -> Dict[str, str]:
         """
         Get subregions (Район, Hromada) for a parent region.
         Returns a dictionary with UID as the key and subregion name as the value.
         """
-        return self.sorted_subregions.get(parent_uid, {})
+        return self.subregions.get(parent_uid, {})
 
     def get_location_name(self, uid: str) -> Optional[str]:
         """Get location name by UID."""
