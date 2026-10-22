@@ -891,6 +891,15 @@ async def show_remove_menu(query, context):
     """Show menu to remove locations."""
     context.user_data["action"] = "remove"
     regions = location_manager.get_regions()
+    user_locations = user_manager.get_user_locations(query.from_user.id)
+    regions = [
+        loc for loc in regions
+        if loc["uid"] in user_locations
+        or any(
+            subregion["uid"] in user_locations
+            for subregion in location_manager.get_subregions(loc["uid"])
+        )
+    ]
     
     keyboard = []
     for loc in sorted(regions, key=lambda x: x["name"]):
