@@ -71,6 +71,7 @@ ALERT_TYPE_MAP = {
     "air_raid": "✈️ Тривога",
     "artillery_shelling": "💥 Артилерійський обстріл",
     "urban_fights": "🔫 Стрілецькі бої",
+    "unspecified_missiles": "❓ Невизначена тривога"
 }
 
 LEVEL_ICON = {
@@ -454,29 +455,33 @@ class AlertsPollerManager:
             old_alert = self.last_response.get(location_uid)
             
             if not old_alert:
-                # New alert started
+                # Case 1: New alert started
                 changes[location_uid] = {
                     "type": "new_alert",
                     "alert": alert,
+                    "specific_threat": None, # Will use main alert / first threat
                 }
             else:
                 # Check for new threats
                 old_threats = set()
-                new_threats = set()
+                new_threats_list = alert.get("threats", [])
                 
                 for threat in old_alert.get("threats", []):
                     threat_key = (threat.get("threat_type"), threat.get("level"))
                     old_threats.add(threat_key)
                 
-                for threat in alert.get("threats", []):
+                added_threats = []
+                for threat in new_threats_list:
                     threat_key = (threat.get("threat_type"), threat.get("level"))
-                    new_threats.add(threat_key)
+                    if threat_key not in old_threats:
+                        added_threats.append(threat)
                 
-                if new_threats - old_threats:
-                    # New threat(s) added
+                if added_threats:
+                    # Case 2: New threat(s) added; focus on the newly added threat (threat2)
                     changes[location_uid] = {
                         "type": "new_threat",
                         "alert": alert,
+                        "specific_threat": added_threats[0], # The newly added threat
                     }
 
         # Check for cancelled alerts
@@ -986,22 +991,26 @@ async def send_notifications(
         alert_type = change_info["type"]
         location_title = alert.get("location_title", "Unknown")
         alert_level = alert.get("alert_level", "red")
+        specific_threat = change_info.get("specific_threat")
         
         # Prepare message based on change type
         if alert_type == "alert_cancelled":
             # 🟢 Explicitly force the icon to green for any cancellation notification
             message = f"🟢 {location_title}: відбій тривоги"
+        elif alert_type == "new_threat" and specific_threat:
+            # Send message specifically for the newly added threat
+            source_msg = specific_threat.get("source_message") or ALERT_TYPE_MAP.get(specific_threat.get("threat_type"), specific_threat.get("threat_type"))
+            threat_level = specific_threat.get("level", alert_level)
+            message = f"{LEVEL_ICON.get(threat_level, '🟡')} {location_title}: {source_msg}"
         else:
-            # New alert or new threat
+            # New alert (or fallback) -> send message with threat1 (first threat or general alert type)
             threats = alert.get("threats", [])
             if threats:
-                # Use first threat's message
                 threat = threats[0]
-                source_msg = threat.get("source_message") or threat.get("threat_type")
+                source_msg = threat.get("source_message") or ALERT_TYPE_MAP.get(threat.get("threat_type"), threat.get("threat_type"))
                 threat_level = threat.get("level", alert_level)
                 message = f"{LEVEL_ICON.get(threat_level, '🟡')} {location_title}: {source_msg}"
             else:
-                # No threats, just alert type
                 alert_name = ALERT_TYPE_MAP.get(alert.get("alert_type"), "Тривога")
                 message = f"{LEVEL_ICON.get(alert_level, '🟡')} {location_title}: {alert_name}"
         
